@@ -7,6 +7,7 @@ import com.github.luben.zstd.Zstd;
 
 /** Current native inventory wire formats, kept outside the inventory domain. */
 public final class InventoryPackets {
+    public static final int SORT_ID=1506;
     public record Request(int owner,int sequence,Inventory.Address source,List<Inventory.Address> destinations,int count,boolean split,int targetAggregate) {}
     private static Inventory.Address address(DataInputStream in,int owner,int page)throws IOException {
         int aggregate=in.readUnsignedByte(),container=in.readUnsignedByte(),slot=in.readUnsignedShort();
@@ -27,6 +28,22 @@ public final class InventoryPackets {
         }else throw new IOException("inventory_request_kind");
         if(in.available()!=0||count<0||split&&count==0||owner!=0&&owner!=-1)throw new IOException("inventory_request_layout");
         return new Request(owner,sequence,source,List.copyOf(destinations),count,split,target);
+    }
+    /** Native sort request: the container identity, its unused sequence default, then the container root address.
+     * Storage screens encode their local root as aggregate 0 with container 0 or the page, so the open page resolves that form. */
+    public static Inventory.Address sort(byte[] body,int page,boolean storageOpen)throws IOException {
+        DataInputStream in=Wire.input(body);int identity=in.readShort();in.readShort();Inventory.Address raw=new Inventory.Address(in.readUnsignedByte(),in.readUnsignedByte(),in.readUnsignedShort());
+        Inventory.Address target;
+        // The storage screen keeps its page in a local aggregate-0 model; its grid root is
+        // either (0,0) or (0,page). Only resolve that form while a storage page is open.
+        if(raw.aggregate()==0){
+            if(!storageOpen)throw new IOException("inventory_sort_request");
+            int targetPage=identity>0?identity:raw.container()>0&&raw.container()<StorageLayout.PAGES?raw.container():page;
+            if(targetPage<0||targetPage>=StorageLayout.PAGES)throw new IOException("inventory_sort_request");
+            target=new Inventory.Address(2,targetPage,raw.slot());
+        }else target=raw;
+        if(in.available()!=0||target.slot()!=0||target.aggregate()!=1&&target.aggregate()!=2||target.aggregate()==1&&target.container()!=0||!StorageLayout.validAddress(target))throw new IOException("inventory_sort_request");
+        return target;
     }
     private static void address(DataOutputStream out,Inventory.Address a,int owner)throws IOException {out.writeByte(a.aggregate()==2&&owner==-1?0:a.aggregate());out.writeByte(a.aggregate()==2&&owner==-1?0:a.container());out.writeShort(a.slot());}
     public static byte[] stack(ItemStack stack){return Wire.bytes(out->{out.writeBoolean(stack!=null);if(stack!=null){out.writeShort(stack.id());out.writeInt(stack.count());out.writeShort(stack.metadata());byte[] state=stack.state();out.writeBoolean(state.length>0);out.write(state);out.write(stack.properties());}});}

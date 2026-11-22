@@ -421,6 +421,7 @@ public final class GameServer implements AutoCloseable {
         if(id==695){if(body.length!=16)throw new IOException("lootbox_finish_request");return;}
         if(id==928){if(body.length!=4||ByteBuffer.wrap(body).getInt()!=-1)throw new IOException("inventory_open");openInventory(s);return;}
         if(id==2060||id==562){if(id==2060&&body.length!=0||id==562&&body.length!=4)throw new IOException("storage_open");int page=id==562?ByteBuffer.wrap(body).getInt():s.inventoryScreen.page();if(page<0||page>=InventoryScreen.PAGES)throw new IOException("storage_page");openStorage(s,page,id==2060);return;}
+        if(id==InventoryPackets.SORT_ID){inventorySort(s,body);return;}
         if(id==1231||id==102||id==1627||id==2040||id==2009){inventoryRequest(s,id,body);return;}
         if(id==212){if(!playerRules.entitled(character(s))){inventorySnapshot(s,0);if(body.length>=4&&ByteBuffer.wrap(body).getShort()==0)enqueue(s,0,InventoryPackets.ack(0,ByteBuffer.wrap(body).getShort(2)));enqueue(s,0,GamePackets.chat("item_editor_requires_admin"));return;}if(body.length<18||body.length>8200)throw new IOException("editor_request_size");var in=Wire.input(body);int owner=in.readShort(),sequence=in.readShort();Inventory.Address address=new Inventory.Address(in.readUnsignedByte(),in.readUnsignedByte(),in.readUnsignedShort());if(owner!=0||address.aggregate()==2)throw new IOException("editor_owner");inventories.edit(character(s),address,in.readAllBytes(),plan->inventoryChanged(s,plan,()->enqueue(s,0,InventoryPackets.ack(owner,sequence))),error->{inventorySnapshot(s,0);enqueue(s,0,InventoryPackets.ack(owner,sequence));enqueue(s,0,GamePackets.chat(error));});return;}
         if(id==1527){if(!playerRules.entitled(character(s))){inventorySnapshot(s,0);enqueue(s,0,GamePackets.chat("item_editor_requires_admin"));return;}if(body.length<10||body.length>65536||body[0]!=1)throw new IOException("editor_config_size");var in=Wire.input(body);in.readByte();Inventory.Address address=new Inventory.Address(in.readUnsignedByte(),in.readUnsignedByte(),in.readUnsignedShort());int size=in.readInt();if(address.aggregate()==2||size<=0||size!=in.available())throw new IOException("editor_config_layout");inventories.edit(character(s),address,in.readAllBytes(),true,plan->inventoryChanged(s,plan,()->{}),error->{inventorySnapshot(s,0);enqueue(s,0,GamePackets.chat(error));});return;}
@@ -1299,6 +1300,14 @@ public final class GameServer implements AutoCloseable {
         for(var e:plan.changes().entrySet()){Inventory.Address a=e.getKey();if(a.aggregate()<2)enqueue(s,0,InventoryPackets.point(0,-1,a,e.getValue()));if(s.inventoryScreen.storageOpen()&&(a.aggregate()==1||a.aggregate()==2&&a.container()==s.inventoryScreen.page()))enqueue(s,0,InventoryPackets.point(-1,-1,a,e.getValue()));}
         if(plan.changes().keySet().stream().anyMatch(a->a.aggregate()==0)){refreshWeapon(s,()->{enqueue(s,0,GamePackets.attributes(tick,0,equipment(s)));inventorySnapshot(s,0);syncHand(s);syncAmmo(s);vitals(s);for(Session other:sessions.values())if(other!=s&&other.ready)enqueue(other,0,Wire.concat(GamePackets.attributes(tick,s.entity,equipment(s)),GamePackets.attributes(tick,s.entity,Factions.attributes(s.faction))));done.run();});}
         else {refreshReserve(s);done.run();}
+    }
+    private void inventorySort(Session s,byte[] body)throws Exception{
+        Inventory.Address target=InventoryPackets.sort(body,s.inventoryScreen.page(),s.inventoryScreen.storageOpen());boolean storage=target.aggregate()==2;
+        if(storage&&(!s.inventoryScreen.storageOpen()||target.container()!=s.inventoryScreen.page())){inventorySnapshot(s,-1);return;}
+        if(!InventoryScreen.available(s.hp,s.respawning)){inventorySnapshot(s,storage?-1:0);return;}
+        inventories.mutate(character(s),before->before.sort(target),plan->{
+            if(plan.changes().size()>32)inventorySnapshot(s,storage?-1:0);else inventoryChanged(s,plan,()->{});
+        },error->inventorySnapshot(s,storage?-1:0));
     }
     private void inventoryRequest(Session s,int id,byte[] body)throws Exception{
         if(BoltCosmetics.handle(this,s,id,body))return;

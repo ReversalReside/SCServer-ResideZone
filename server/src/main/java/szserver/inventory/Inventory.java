@@ -81,5 +81,56 @@ public final class Inventory {
         if(remaining!=0)throw new IllegalArgumentException(aggregate==1?"inventory_full":"storage_full");return replace(changes,stack.count());
     }
 
+    /** Bag layout priority: bulk gear first, then small consumables.
+     * Ammo deliberately ranks below weapons and containers; it used to jump ahead of a carried backpack. */
+    private static final List<String> SORT_ORDER=List.of(
+        "weapon","flamethrower","launcher","melee_weapon","melee",
+        "backpack","container","tradepack","extreme_tradepack","key_holder","command_item",
+        "armor","armor_plate",
+        "acc","barrel_att","sight","forend","butt","handle","handgrip","side_att",
+        "sight_mount","butt_mount","bolt_gem","weapon_module","weapon_module_remover",
+        "weapon_module_core","weapon_module_giver","magazine",
+        "bullet",
+        "medicine","medicine_animated","revive_item","grenade","ability_grenade","landmine",
+        "explosive","firework_rocket",
+        "artefakt","artifact","artefact","art_modifier","ravent/multiset_artefact",
+        "barter_resource","barter_coupon","currency_token","premium_token","bet_coin",
+        "reputation_token","season_pass_point_token","season_pass_level_token","season_pass_bp_token",
+        "custom","quest_item","lootbox");
+    private static boolean same(ItemStack a,ItemStack b){return a==b||a!=null&&b!=null&&a.id()==b.id()&&a.count()==b.count()&&a.metadata()==b.metadata()&&a.equipmentMask()==b.equipmentMask()&&a.gridWidth()==b.gridWidth()&&a.gridHeight()==b.gridHeight()&&Arrays.equals(a.state(),b.state())&&Arrays.equals(a.properties(),b.properties());}
+    private int rank(ItemStack item){String type=catalog.get(item.id()).type();int rank=SORT_ORDER.indexOf(type);return rank<0?SORT_ORDER.size():rank;}
+    private static int place(BitSet occupied,int capacity,int width,int height){
+        int rows=(capacity+7)/8;
+        for(int slot=0;slot<capacity;slot++){
+            int x=slot%8,y=slot/8;if(x+width>8||y+height>rows)continue;boolean free=true;
+            for(int dy=0;dy<height&&free;dy++)for(int dx=0;dx<width;dx++)if(occupied.get((y+dy)*8+x+dx)){free=false;break;}
+            if(free)return slot;
+        }return -1;
+    }
+    /** Compact one native bag or storage page: merge identical stacks, then pack by item family and id. */
+    public Plan sort(Address root){
+        check(root);if(root.slot()!=0||root.aggregate()!=1&&root.aggregate()!=2)throw new IllegalArgumentException("sort_address");
+        if(root.aggregate()==2)deposit(root);
+        int capacity=capacity(root);List<ItemStack> stacks=new ArrayList<>();
+        for(var e:items.entrySet())if(e.getKey().aggregate()==root.aggregate()&&e.getKey().container()==root.container()){
+            ItemStack item=e.getValue();int limit=limit(e.getKey(),item),remaining=item.count();
+            for(int i=0;i<stacks.size()&&remaining>0;i++){ItemStack row=stacks.get(i);
+                if(row.mergeable(item)&&row.gridWidth()==item.gridWidth()&&row.gridHeight()==item.gridHeight()&&row.count()<limit){int moved=Math.min(remaining,limit-row.count());stacks.set(i,row.count(row.count()+moved));remaining-=moved;}
+            }
+            while(remaining>0){int take=Math.min(remaining,limit);stacks.add(item.count(take));remaining-=take;}
+        }
+        stacks.sort((a,b)->{int n=Integer.compare(rank(a),rank(b));if(n==0)n=catalog.get(a.id()).type().compareTo(catalog.get(b.id()).type());if(n==0)n=Integer.compare(a.id(),b.id());if(n==0)n=Integer.compare(a.metadata(),b.metadata());if(n==0)n=Arrays.compareUnsigned(a.state(),b.state());if(n==0)n=Arrays.compareUnsigned(a.properties(),b.properties());if(n==0)n=Integer.compare(a.equipmentMask(),b.equipmentMask());return n==0?Integer.compare(b.count(),a.count()):n;});
+        BitSet occupied=new BitSet(capacity);Map<Address,ItemStack> layout=new LinkedHashMap<>();
+        for(ItemStack item:stacks){
+            int width=catalog.width(item),height=catalog.height(item),slot=place(occupied,capacity,width,height);
+            if(slot<0)throw new IllegalArgumentException("inventory_sort_overflow");
+            layout.put(new Address(root.aggregate,root.container,slot),item);int x=slot%8,y=slot/8;
+            for(int dy=0;dy<height;dy++)for(int dx=0;dx<width;dx++)occupied.set((y+dy)*8+x+dx);
+        }
+        Set<Address> addresses=new TreeSet<>();for(Address a:items.keySet())if(a.aggregate()==root.aggregate()&&a.container()==root.container())addresses.add(a);addresses.addAll(layout.keySet());
+        Map<Address,ItemStack> changes=new LinkedHashMap<>();for(Address a:addresses)if(!same(items.get(a),layout.get(a)))changes.put(a,layout.get(a));
+        return replace(changes,changes.size());
+    }
+
     public double weight(){return items.entrySet().stream().filter(e->e.getKey().aggregate<2).mapToDouble(e->catalog.get(e.getValue().id()).weight()*e.getValue().count()).sum();}
 }
